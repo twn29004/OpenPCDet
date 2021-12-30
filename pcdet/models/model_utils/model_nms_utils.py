@@ -22,6 +22,7 @@ def class_agnostic_nms(box_scores, box_preds, nms_config, score_thresh=None):
     if score_thresh is not None:
         original_idxs = scores_mask.nonzero().view(-1)
         selected = original_idxs[selected]
+    # 返回的是选择的边界框及其对应的下标
     return selected, src_box_scores[selected]
 
 

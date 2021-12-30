@@ -13,6 +13,8 @@ class PointHeadBox(PointHeadTemplate):
     def __init__(self, num_class, input_channels, model_cfg, predict_boxes_when_training=False, **kwargs):
         super().__init__(model_cfg=model_cfg, num_class=num_class)
         self.predict_boxes_when_training = predict_boxes_when_training
+
+        # 注意这个分类分支不是分前景背景，而是分是车还是人
         self.cls_layers = self.make_fc_layers(
             fc_cfg=self.model_cfg.CLS_FC,
             input_channels=input_channels,
@@ -87,6 +89,10 @@ class PointHeadBox(PointHeadTemplate):
             point_features = batch_dict['point_features_before_fusion']
         else:
             point_features = batch_dict['point_features']
+        
+        # 注意，这里计算bounding_box是根据所有的点来计算的
+        # 思考一下这里为什么不只利用前景点来计算三维边界框，感觉一个原因是分割出来的前景点的数目不一定的
+        # 但是前期构建的网络需要一个固定的输入
         point_cls_preds = self.cls_layers(point_features)  # (total_points, num_class)
         point_box_preds = self.box_layers(point_features)  # (total_points, box_code_size)
 
@@ -96,7 +102,9 @@ class PointHeadBox(PointHeadTemplate):
         ret_dict = {'point_cls_preds': point_cls_preds,
                     'point_box_preds': point_box_preds}
         if self.training:
+            # 这里的意思应该是说在训练的时候需要分配一个目标来优化
             targets_dict = self.assign_targets(batch_dict)
+            # 这里的label是表示的是点的所属类别的标签。其中0是背景，-1是忽略了的
             ret_dict['point_cls_labels'] = targets_dict['point_cls_labels']
             ret_dict['point_box_labels'] = targets_dict['point_box_labels']
 

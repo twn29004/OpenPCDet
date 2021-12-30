@@ -15,7 +15,8 @@ class PointRCNNHead(RoIHeadTemplate):
         self.SA_modules = nn.ModuleList()
         channel_in = input_channels
 
-        self.num_prefix_channels = 3 + 2  # xyz + point_scores + point_depth
+        # 这个应该是Local Spatial Feature的的长度。 坐标, 分割分数 + 不知道这个depth是什么
+        self.num_prefix_channels = 3 + 2  # xyz + point_scores + point_depth 
         xyz_mlps = [self.num_prefix_channels] + self.model_cfg.XYZ_UP_LAYER
         shared_mlps = []
         for k in range(len(xyz_mlps) - 1):
@@ -99,13 +100,14 @@ class PointRCNNHead(RoIHeadTemplate):
         batch_idx = batch_dict['point_coords'][:, 0]
         point_coords = batch_dict['point_coords'][:, 1:4]
         point_features = batch_dict['point_features']
-        rois = batch_dict['rois']  # (B, num_rois, 7 + C)
+        rois = batch_dict['rois']  # (B, num_rois, 7 + C) 这里好像没有C, 就是7
         batch_cnt = point_coords.new_zeros(batch_size).int()
         for bs_idx in range(batch_size):
+            # 这个就是计算每一个batch中点的数目?
             batch_cnt[bs_idx] = (batch_idx == bs_idx).sum()
-
+        # 保证每个batch中点的数目都是一定的
         assert batch_cnt.min() == batch_cnt.max()
-
+        # 从计算图中将这个量分离出来，不需要计算梯度了
         point_scores = batch_dict['point_cls_scores'].detach()
         point_depths = point_coords.norm(dim=1) / self.model_cfg.ROI_POINT_POOL.DEPTH_NORMALIZER - 0.5
         point_features_list = [point_scores[:, None], point_depths[:, None], point_features]
@@ -113,16 +115,17 @@ class PointRCNNHead(RoIHeadTemplate):
         batch_points = point_coords.view(batch_size, -1, 3)
         batch_point_features = point_features_all.view(batch_size, -1, point_features_all.shape[-1])
 
+        # 这部分的主要目的是给计算出roi中的点以及调整roi中点的坐标，进行坐标变化
         with torch.no_grad():
             pooled_features, pooled_empty_flag = self.roipoint_pool3d_layer(
                 batch_points, batch_point_features, rois
             )  # pooled_features: (B, num_rois, num_sampled_points, 3 + C), pooled_empty_flag: (B, num_rois)
 
-            # canonical transformation
-            roi_center = rois[:, :, 0:3]
-            pooled_features[:, :, :, 0:3] -= roi_center.unsqueeze(dim=2)
-
+            # canonical transformation 坐标变化在这里
+            roi_center = rois[:, :, 0:3] # (B, num_rois, 3)
+            pooled_features[:, :, :, 0:3] -= roi_center.unsqueeze(dim=2) # 经过unsqueeze之后维度变化为(B, num_rois, 1, 3)
             pooled_features = pooled_features.view(-1, pooled_features.shape[-2], pooled_features.shape[-1])
+            # 旋转bonunding box中点云的方向转到roi的方向上
             pooled_features[:, :, 0:3] = common_utils.rotate_points_along_z(
                 pooled_features[:, :, 0:3], -rois.view(-1, rois.shape[-1])[:, 6]
             )
@@ -137,33 +140,38 @@ class PointRCNNHead(RoIHeadTemplate):
         Returns:
 
         """
+        # 在这里根据前面计算的点的分类以及三维边界框来选取前景点对应的框和特征
+        # batch['rois']在这里生成
         targets_dict = self.proposal_layer(
             batch_dict, nms_config=self.model_cfg.NMS_CONFIG['TRAIN' if self.training else 'TEST']
         )
+
         if self.training:
+            # 在这里将预测值和需要优化的值进行绑定，计算损失等
             targets_dict = self.assign_targets(batch_dict)
             batch_dict['rois'] = targets_dict['rois']
             batch_dict['roi_labels'] = targets_dict['roi_labels']
 
         pooled_features = self.roipool3d_gpu(batch_dict)  # (total_rois, num_sampled_points, 3 + C)
-
+        # xyz_input (total_rois, self.num_prefix_channels, num_sampled_points, 1)
         xyz_input = pooled_features[..., 0:self.num_prefix_channels].transpose(1, 2).unsqueeze(dim=3).contiguous()
+        # 这里的目的是将xyz上采样到和feature相同的通道数
         xyz_features = self.xyz_up_layer(xyz_input)
         point_features = pooled_features[..., self.num_prefix_channels:].transpose(1, 2).unsqueeze(dim=3)
         merged_features = torch.cat((xyz_features, point_features), dim=1)
+        # 对拼接后的特征进行下采样，减少通道数
         merged_features = self.merge_down_layer(merged_features)
-
+        # 向PointNet中传入混合后的特征以及点的坐标
         l_xyz, l_features = [pooled_features[..., 0:3].contiguous()], [merged_features.squeeze(dim=3).contiguous()]
-
         for i in range(len(self.SA_modules)):
             li_xyz, li_features = self.SA_modules[i](l_xyz[i], l_features[i])
             l_xyz.append(li_xyz)
             l_features.append(li_features)
 
         shared_features = l_features[-1]  # (total_rois, num_features, 1)
-        rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
-        rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
-
+        # 这个是预测置信度的
+        rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (rois * batch_size, 1 or 2)
+        rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (rois * batch_size, 7)
         if not self.training:
             batch_cls_preds, batch_box_preds = self.generate_predicted_boxes(
                 batch_size=batch_dict['batch_size'], rois=batch_dict['rois'], cls_preds=rcnn_cls, box_preds=rcnn_reg

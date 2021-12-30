@@ -88,6 +88,7 @@ class PointHeadTemplate(nn.Module):
                     points_single.unsqueeze(dim=0), extend_gt_boxes[k:k+1, :, 0:7].contiguous()
                 ).long().squeeze(dim=0)
                 fg_flag = box_fg_flag
+                # 这个是异或，就是说对于不位于框内，但是位于放大的框内的点，我们将其标志设置为-1
                 ignore_flag = fg_flag ^ (extend_box_idxs_of_pts >= 0)
                 point_cls_labels_single[ignore_flag] = -1
             elif use_ball_constraint:
@@ -98,8 +99,11 @@ class PointHeadTemplate(nn.Module):
             else:
                 raise NotImplementedError
 
+            # 这个是利用前景点对应的box的下标获得对应的box
             gt_box_of_fg_points = gt_boxes[k][box_idxs_of_pts[fg_flag]]
+            # 这个也是批量复制，对于满足fg_flag的项，将其值赋为对应的box的类别的值
             point_cls_labels_single[fg_flag] = 1 if self.num_class == 1 else gt_box_of_fg_points[:, -1].long()
+            # 在所有的点中，将属于这个批次的点的类别标签对应上
             point_cls_labels[bs_mask] = point_cls_labels_single
 
             if ret_box_labels and gt_box_of_fg_points.shape[0] > 0:
@@ -132,12 +136,13 @@ class PointHeadTemplate(nn.Module):
         point_cls_labels = self.forward_ret_dict['point_cls_labels'].view(-1)
         point_cls_preds = self.forward_ret_dict['point_cls_preds'].view(-1, self.num_class)
 
+        # 这段的意思就是把不忽略的都算出来，然后在除以positive点的个数来归一化
         positives = (point_cls_labels > 0)
         negative_cls_weights = (point_cls_labels == 0) * 1.0
         cls_weights = (negative_cls_weights + 1.0 * positives).float()
         pos_normalizer = positives.sum(dim=0).float()
         cls_weights /= torch.clamp(pos_normalizer, min=1.0)
-
+        # +1 表示增加背景这一类
         one_hot_targets = point_cls_preds.new_zeros(*list(point_cls_labels.shape), self.num_class + 1)
         one_hot_targets.scatter_(-1, (point_cls_labels * (point_cls_labels >= 0).long()).unsqueeze(dim=-1).long(), 1.0)
         one_hot_targets = one_hot_targets[..., 1:]
