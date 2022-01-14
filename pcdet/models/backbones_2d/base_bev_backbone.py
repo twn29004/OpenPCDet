@@ -1,3 +1,4 @@
+from re import S
 import numpy as np
 import torch
 import torch.nn as nn
@@ -89,6 +90,7 @@ class BaseBEVBackbone(nn.Module):
         ups = []
         ret_dict = {}
         x = spatial_features
+
         for i in range(len(self.blocks)):
             x = self.blocks[i](x)
 

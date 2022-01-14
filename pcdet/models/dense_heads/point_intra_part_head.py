@@ -24,6 +24,7 @@ class PointIntraPartOffsetHead(PointHeadTemplate):
             output_channels=3
         )
         target_cfg = self.model_cfg.TARGET_CONFIG
+        # 如果有box_layer的话，那么就是anchor-free的方法
         if target_cfg.get('BOX_CODER', None) is not None:
             self.box_coder = getattr(box_coder_utils, target_cfg.BOX_CODER)(
                 **target_cfg.BOX_CODER_CONFIG

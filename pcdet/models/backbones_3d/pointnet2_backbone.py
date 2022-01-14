@@ -17,6 +17,7 @@ class PointNet2MSG(nn.Module):
         self.num_points_each_layer = []
         skip_channel_list = [input_channels - 3]
         for k in range(self.model_cfg.SA_CONFIG.NPOINTS.__len__()):
+            
             mlps = self.model_cfg.SA_CONFIG.MLPS[k].copy()
             channel_out = 0
             for idx in range(mlps.__len__()):
@@ -88,9 +89,10 @@ class PointNet2MSG(nn.Module):
                 l_xyz[i - 1], l_xyz[i], l_features[i - 1], l_features[i]
             )  # (B, C, N)
 
-        point_features = l_features[0].permute(0, 2, 1).contiguous()  # (B, N, C)
-        batch_dict['point_features'] = point_features.view(-1, point_features.shape[-1])
-        batch_dict['point_coords'] = torch.cat((batch_idx[:, None].float(), l_xyz[0].view(-1, 3)), dim=1)
+        point_features = l_features[0].permute(0, 2, 1).contiguous()  # (B, N, C), N表示点的数目
+        batch_dict['point_features'] = point_features.view(-1, point_features.shape[-1]) # (B*N, C)
+        # [batch_idx, x, y, z]
+        batch_dict['point_coords'] = torch.cat((batch_idx[:, None].float(), l_xyz[0].view(-1, 3)), dim=1) # 这里是将点的batch的下标和点的坐标组合起来，方便之后区分这些点的batch
         return batch_dict
 
 

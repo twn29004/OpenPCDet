@@ -5,7 +5,7 @@ import torch.nn as nn
 from torch.autograd import Function, Variable
 
 from . import pointnet2_batch_cuda as pointnet2
-
+# import pointnet2_batch_cuda as pointnet2
 
 class FurthestPointSampling(Function):
     @staticmethod

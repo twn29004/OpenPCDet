@@ -5,6 +5,7 @@ from ...ops.pointnet2.pointnet2_batch import pointnet2_modules
 from ...ops.roipoint_pool3d import roipoint_pool3d_utils
 from ...utils import common_utils
 from .roi_head_template import RoIHeadTemplate
+from ...ops.pointnet2.pointnet2_batch import attention_sa
 
 
 class PointRCNNHead(RoIHeadTemplate):
@@ -17,6 +18,7 @@ class PointRCNNHead(RoIHeadTemplate):
 
         # 这个应该是Local Spatial Feature的的长度。 坐标, 分割分数 + 不知道这个depth是什么
         self.num_prefix_channels = 3 + 2  # xyz + point_scores + point_depth 
+        
         xyz_mlps = [self.num_prefix_channels] + self.model_cfg.XYZ_UP_LAYER
         shared_mlps = []
         for k in range(len(xyz_mlps) - 1):
@@ -47,6 +49,13 @@ class PointRCNNHead(RoIHeadTemplate):
                 )
             )
             channel_in = mlps[-1]
+
+        # self.PCTEncoder = attention_sa.PCTEncoder(input_xyz_channel=self.num_prefix_channels, \
+        #     input_embeding_channels=64, features_channels=128, use_features=True,attention_method="OffsetAttention", \
+        #         attention_layer_num=4, pool_method="max_pooling", output_channels=512)
+        
+        self.roi_att = attention_sa.StackedPointAttention(channels_in=channel_in + 3, channels_out = int(channel_in), \
+            attention_method="SelfAttention", num_attention_layer=1)
 
         self.cls_layers = self.make_fc_layers(
             input_channels=channel_in, output_channels=self.num_class, fc_list=self.model_cfg.CLS_FC
@@ -103,11 +112,9 @@ class PointRCNNHead(RoIHeadTemplate):
         rois = batch_dict['rois']  # (B, num_rois, 7 + C) 这里好像没有C, 就是7
         batch_cnt = point_coords.new_zeros(batch_size).int()
         for bs_idx in range(batch_size):
-            # 这个就是计算每一个batch中点的数目?
             batch_cnt[bs_idx] = (batch_idx == bs_idx).sum()
-        # 保证每个batch中点的数目都是一定的
         assert batch_cnt.min() == batch_cnt.max()
-        # 从计算图中将这个量分离出来，不需要计算梯度了
+
         point_scores = batch_dict['point_cls_scores'].detach()
         point_depths = point_coords.norm(dim=1) / self.model_cfg.ROI_POINT_POOL.DEPTH_NORMALIZER - 0.5
         point_features_list = [point_scores[:, None], point_depths[:, None], point_features]
@@ -145,14 +152,16 @@ class PointRCNNHead(RoIHeadTemplate):
         targets_dict = self.proposal_layer(
             batch_dict, nms_config=self.model_cfg.NMS_CONFIG['TRAIN' if self.training else 'TEST']
         )
-
+        # 为什么是在这里进行版绑定
         if self.training:
             # 在这里将预测值和需要优化的值进行绑定，计算损失等
             targets_dict = self.assign_targets(batch_dict)
-            batch_dict['rois'] = targets_dict['rois']
-            batch_dict['roi_labels'] = targets_dict['roi_labels']
+            # 上面proposaL_layer中生成的roi在这里重新采样
+            batch_dict['rois'] = targets_dict['rois']  # (B, 128, 7)
+            batch_dict['roi_labels'] = targets_dict['roi_labels'] #(B, 128, 1)
 
-        pooled_features = self.roipool3d_gpu(batch_dict)  # (total_rois, num_sampled_points, 3 + C)
+        pooled_features = self.roipool3d_gpu(batch_dict)  # (rois * batch_size, num_sampled_points, 3 + C)
+        
         # xyz_input (total_rois, self.num_prefix_channels, num_sampled_points, 1)
         xyz_input = pooled_features[..., 0:self.num_prefix_channels].transpose(1, 2).unsqueeze(dim=3).contiguous()
         # 这里的目的是将xyz上采样到和feature相同的通道数
@@ -168,7 +177,16 @@ class PointRCNNHead(RoIHeadTemplate):
             l_xyz.append(li_xyz)
             l_features.append(li_features)
 
-        shared_features = l_features[-1]  # (total_rois, num_features, 1)
+        origin_shared_features = l_features[-1]  # (B * rois, num_features, 1) num_features = 512
+
+        shared_features = origin_shared_features.view((batch_dict['batch_size'], -1, origin_shared_features.shape[-2])).transpose(1,2) # (B, point_feature, num_rois)
+        roi_center = batch_dict['rois'][:, :, :3].transpose(1,2)
+        att_input = torch.cat((shared_features, roi_center), dim=1)
+        shared_features = self.roi_att(att_input)
+        shared_features = shared_features.view((-1, shared_features.shape[-2], 1))
+
+        shared_features += origin_shared_features
+        
         # 这个是预测置信度的
         rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (rois * batch_size, 1 or 2)
         rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (rois * batch_size, 7)

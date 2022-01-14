@@ -204,7 +204,7 @@ class PartA2FCHead(RoIHeadTemplate):
         shared_feature = spconv.SparseConvTensor(merged_feature, coords, sparse_shape, batch_size_rcnn)
         shared_feature = shared_feature.dense().view(batch_size_rcnn, -1, 1)
 
-        shared_feature = self.shared_fc_layer(shared_feature)
+        shared_feature = self.shared_fc_layer(shared_feature) # (num_rois, C, 1)
 
         rcnn_cls = self.cls_layers(shared_feature).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
         rcnn_reg = self.reg_layers(shared_feature).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)

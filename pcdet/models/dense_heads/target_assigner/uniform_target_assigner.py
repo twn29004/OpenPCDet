@@ -1,14 +1,15 @@
-import numpy as np
 import torch
+import numpy as np
 
 from ....ops.iou3d_nms import iou3d_nms_utils
+from ....utils import common_utils
 from ....utils import box_utils
 
 
-class AxisAlignedTargetAssigner(object):
-    def __init__(self, model_cfg, class_names, box_coder, match_height=False):
-        super().__init__()
-
+class UniformMatchTargetAssigner(object):
+    def __init__(self, topk, model_cfg,  box_coder, class_names, match_height=False):
+        self.topk = topk
+        self.match_height = match_height
         anchor_generator_cfg = model_cfg.ANCHOR_GENERATOR_CONFIG
         anchor_target_cfg = model_cfg.TARGET_ASSIGNER_CONFIG
         self.box_coder = box_coder
@@ -18,21 +19,14 @@ class AxisAlignedTargetAssigner(object):
         self.pos_fraction = anchor_target_cfg.POS_FRACTION if anchor_target_cfg.POS_FRACTION >= 0 else None
         self.sample_size = anchor_target_cfg.SAMPLE_SIZE
         self.norm_by_num_examples = anchor_target_cfg.NORM_BY_NUM_EXAMPLES
-        self.matched_thresholds = {}
-        self.unmatched_thresholds = {}
+        self.neg_ignore_thr = {}
+        self.pos_ignore_thr = {}
         for config in anchor_generator_cfg:
-            self.matched_thresholds[config['class_name']] = config['matched_threshold']
-            self.unmatched_thresholds[config['class_name']] = config['unmatched_threshold']
+            self.neg_ignore_thr[config['class_name']] = config['neg_ignore_threshold']
+            self.pos_ignore_thr[config['class_name']] = config['pos_ignore_threshold']
 
         self.use_multihead = model_cfg.get('USE_MULTIHEAD', False)
-        # self.separate_multihead = model_cfg.get('SEPARATE_MULTIHEAD', False)
-        # if self.seperate_multihead:
-        #     rpn_head_cfgs = model_cfg.RPN_HEAD_CFGS
-        #     self.gt_remapping = {}
-        #     for rpn_head_cfg in rpn_head_cfgs:
-        #         for idx, name in enumerate(rpn_head_cfg['HEAD_CLS_NAME']):
-        #             self.gt_remapping[name] = idx + 1
-
+    
     def assign_targets(self, all_anchors, gt_boxes_with_classes):
         """
         Args:
@@ -53,7 +47,6 @@ class AxisAlignedTargetAssigner(object):
         batch_size = gt_boxes_with_classes.shape[0]
         gt_classes = gt_boxes_with_classes[:, :, -1]
         gt_boxes = gt_boxes_with_classes[:, :, :-1]
-
         # 一个batch一个batch的处理
         for k in range(batch_size):
             cur_gt = gt_boxes[k]
@@ -76,13 +69,6 @@ class AxisAlignedTargetAssigner(object):
 
                 if self.use_multihead:
                     anchors = anchors.permute(3, 4, 0, 1, 2, 5).contiguous().view(-1, anchors.shape[-1])
-                    # if self.seperate_multihead:
-                    #     selected_classes = cur_gt_classes[mask].clone()
-                    #     if len(selected_classes) > 0:
-                    #         new_cls_id = self.gt_remapping[anchor_class_name]
-                    #         selected_classes[:] = new_cls_id
-                    # else:
-                    #     selected_classes = cur_gt_classes[mask]
                     selected_classes = cur_gt_classes[mask]
                 else:
                     feature_map_size = anchors.shape[:3]
@@ -93,8 +79,8 @@ class AxisAlignedTargetAssigner(object):
                     anchors,
                     cur_gt[mask],
                     gt_classes=selected_classes,
-                    matched_threshold=self.matched_thresholds[anchor_class_name],
-                    unmatched_threshold=self.unmatched_thresholds[anchor_class_name]
+                    neg_ignore_thr=self.neg_ignore_thr[anchor_class_name],
+                    pos_ignore_thr=self.pos_ignore_thr[anchor_class_name]
                 )
                 target_list.append(single_target)
 
@@ -137,82 +123,60 @@ class AxisAlignedTargetAssigner(object):
 
         }
         return all_targets_dict
-
-    # 处理一个类别的GT和一个类别的anchor
-    def assign_targets_single(self, anchors, gt_boxes, gt_classes, matched_threshold=0.6, unmatched_threshold=0.45):
-
+    
+    # 不同类别需要设置不同的阈值，因为不同类别的大小不一样
+    def assign_targets_single(self, anchors, gt_boxes, gt_classes, neg_ignore_thr=0.6, pos_ignore_thr=0.45):
         num_anchors = anchors.shape[0]
         num_gt = gt_boxes.shape[0]
 
-        labels = torch.ones((num_anchors,), dtype=torch.int32, device=anchors.device) * -1  # 这个应该标注的是这个anchor是什么类别
+        labels = anchors.new_zeros((num_anchors,), dtype=torch.int32) # 这个应该标注的是这个anchor是什么类别 [-1 表示忽略, 0表示背景，其余为其他类别]
         gt_ids = torch.ones((num_anchors,), dtype=torch.int32, device=anchors.device) * -1  # 这个应该表示的是这个anchor对应的GT的下标
 
+
+        # 如果需要进行绑定的话
         if len(gt_boxes) > 0 and anchors.shape[0] > 0:
             # 计算anchor和GT之间的下标，如果使用height的话就计算三维的IoU,如果不match height的话，就计算BEV IoU
             anchor_by_gt_overlap = iou3d_nms_utils.boxes_iou3d_gpu(anchors[:, 0:7], gt_boxes[:, 0:7]) \
                 if self.match_height else box_utils.boxes3d_nearest_bev_iou(anchors[:, 0:7], gt_boxes[:, 0:7])
+            
+            # +1 防止出现除0的问题
+            anchor_by_gt_distance = 1.0 / ((anchors[:, None, 0:3] - gt_boxes[None, :, 0:3]).norm(dim=-1) + 1)  # (num_anchors, num_gt)
+            # 首先筛选出IoU > 0.7
+            anchor_to_gt_overlap_max = torch.max(anchor_by_gt_overlap, dim=1)[0]
+            tmp_ignore_idx = anchor_to_gt_overlap_max > neg_ignore_thr
+            labels[tmp_ignore_idx] = -1
 
-            # NOTE: The speed of these two versions depends the environment and the number of anchors
-            # anchor_to_gt_argmax = torch.from_numpy(anchor_by_gt_overlap.cpu().numpy().argmax(axis=1)).cuda()
-            # 获得anchor与那个GT的IoU最大。同时获取该IoU的值
-            anchor_to_gt_argmax = anchor_by_gt_overlap.argmax(dim=1)
-            anchor_to_gt_max = anchor_by_gt_overlap[torch.arange(num_anchors, device=anchors.device), anchor_to_gt_argmax]
 
-            # gt_to_anchor_argmax = torch.from_numpy(anchor_by_gt_overlap.cpu().numpy().argmax(axis=0)).cuda()
-            # 获得GT关于哪个anchor最大，同时获得相应的IoU的值
-            gt_to_anchor_argmax = anchor_by_gt_overlap.argmax(dim=0)
-            gt_to_anchor_max = anchor_by_gt_overlap[gt_to_anchor_argmax, torch.arange(num_gt, device=anchors.device)]
-            # 如果一个GT没有与任何一个anchor有IoU的话，将这个GT标注为empty_gt，
-            empty_gt_mask = gt_to_anchor_max == 0
-            # 将这部分GT关于anchor的下标标注为-1,避免引起误会
-            gt_to_anchor_max[empty_gt_mask] = -1
+            # anchor_by_gt_metric = anchor_by_gt_overlap * anchor_by_gt_distance
+            anchor_by_gt_metric = anchor_by_gt_distance
+            # 找到关于每一个GT的具有最大metric的anchor的下标
+            topk_values, topk_idxs = anchor_by_gt_metric.topk(k=self.topk, dim=0, largest=True) #[k, num_gt]
+            # 将topk_values的也设置为忽略
+            
+            candidate_ious = anchor_by_gt_overlap[topk_idxs, torch.arange(num_gt)]  # (K, num_gt)
+            # print(candidate_ious)
 
-            # 获得具有最大IoU的anchor的下标 nonzero函数获得是不为0的位置的下标的列表
-            anchors_with_max_overlap = (anchor_by_gt_overlap == gt_to_anchor_max).nonzero()[:, 0]
-            # 获得与GT具有最大IoU的anchor的对应的GT的下标
-            gt_inds_force = anchor_to_gt_argmax[anchors_with_max_overlap]
-            # 给与GT具有最大IoU的anchor设置类别
-            labels[anchors_with_max_overlap] = gt_classes[gt_inds_force]
-            # 设置对应的GT的下标
-            gt_ids[anchors_with_max_overlap] = gt_inds_force.int()
+            pos_ious_ignore_idxs = candidate_ious < pos_ignore_thr
+            pos_ignore_idxs = topk_idxs[pos_ious_ignore_idxs]
+            labels[pos_ignore_idxs] = -1
 
-            pos_inds = anchor_to_gt_max >= matched_threshold
-            gt_inds_over_thresh = anchor_to_gt_argmax[pos_inds]
-            labels[pos_inds] = gt_classes[gt_inds_over_thresh]
-            gt_ids[pos_inds] = gt_inds_over_thresh.int()
-            bg_inds = (anchor_to_gt_max < unmatched_threshold).nonzero()[:, 0]
-        else:
-            bg_inds = torch.arange(num_anchors, device=anchors.device)
-
-        # 获得属于前景点的anchor的下标
-        fg_inds = (labels > 0).nonzero()[:, 0]
-        
-        # pos_fraction 应该是说positive和negative的比例
-        if self.pos_fraction is not None:
-            num_fg = int(self.pos_fraction * self.sample_size)
-            if len(fg_inds) > num_fg:
-                num_disabled = len(fg_inds) - num_fg
-                disable_inds = torch.randperm(len(fg_inds))[:num_disabled]
-                labels[disable_inds] = -1
-                fg_inds = (labels > 0).nonzero()[:, 0]
-
-            num_bg = self.sample_size - (labels > 0).sum()
-            if len(bg_inds) > num_bg:
-                enable_inds = bg_inds[torch.randint(0, len(bg_inds), size=(num_bg,))]
-                labels[enable_inds] = 0
-            # bg_inds = torch.nonzero(labels == 0)[:, 0]
-        else:
-            if len(gt_boxes) == 0 or anchors.shape[0] == 0:
-                labels[:] = 0
+            pos_ious_idxs = candidate_ious >= pos_ignore_thr
+            pos_gt_idxs = pos_ious_idxs.nonzero()[:, 1]
+            # 如果获得这个pos的对应的anchor的下标
+            
+            pos_anchor_idxs = topk_idxs[pos_ious_idxs]
+            if len(pos_gt_idxs) > 0 and len(pos_anchor_idxs) > 0:
+                assert len(pos_gt_idxs) == len(pos_anchor_idxs), "维度不对"
+                labels[pos_anchor_idxs] = gt_classes[pos_gt_idxs]
+                gt_ids[pos_anchor_idxs] = pos_gt_idxs.int()
             else:
-                labels[bg_inds] = 0
-                labels[anchors_with_max_overlap] = gt_classes[gt_inds_force]
-
+                print("没有正样本")
+        
         bbox_targets = anchors.new_zeros((num_anchors, self.box_coder.code_size))
         if len(gt_boxes) > 0 and anchors.shape[0] > 0:
-            fg_gt_boxes = gt_boxes[anchor_to_gt_argmax[fg_inds], :]
-            fg_anchors = anchors[fg_inds, :]
-            bbox_targets[fg_inds, :] = self.box_coder.encode_torch(fg_gt_boxes, fg_anchors)
+            fg_gt_boxes = gt_boxes[pos_gt_idxs]
+            fg_anchors = anchors[pos_anchor_idxs]
+            bbox_targets[pos_anchor_idxs, :] = self.box_coder.encode_torch(fg_gt_boxes, fg_anchors)
 
         reg_weights = anchors.new_zeros((num_anchors,))
 
@@ -230,3 +194,5 @@ class AxisAlignedTargetAssigner(object):
             'reg_weights': reg_weights,
         }
         return ret_dict
+
+            

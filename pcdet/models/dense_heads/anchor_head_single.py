@@ -13,7 +13,6 @@ class AnchorHeadSingle(AnchorHeadTemplate):
         )
 
         self.num_anchors_per_location = sum(self.num_anchors_per_location)
-
         self.conv_cls = nn.Conv2d(
             input_channels, self.num_anchors_per_location * self.num_class,
             kernel_size=1
@@ -43,8 +42,7 @@ class AnchorHeadSingle(AnchorHeadTemplate):
 
         cls_preds = self.conv_cls(spatial_features_2d)
         box_preds = self.conv_box(spatial_features_2d)
-
-        cls_preds = cls_preds.permute(0, 2, 3, 1).contiguous()  # [N, H, W, C]
+        cls_preds = cls_preds.permute(0, 2, 3, 1).contiguous()  # [N, H, W, num_anchors*num_class]
         box_preds = box_preds.permute(0, 2, 3, 1).contiguous()  # [N, H, W, C]
 
         self.forward_ret_dict['cls_preds'] = cls_preds

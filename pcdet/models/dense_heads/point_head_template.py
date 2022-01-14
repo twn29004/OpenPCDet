@@ -75,13 +75,15 @@ class PointHeadTemplate(nn.Module):
         point_cls_labels = points.new_zeros(points.shape[0]).long()
         point_box_labels = gt_boxes.new_zeros((points.shape[0], 8)) if ret_box_labels else None
         point_part_labels = gt_boxes.new_zeros((points.shape[0], 3)) if ret_part_labels else None
+        
         for k in range(batch_size):
             bs_mask = (bs_idx == k)
+            # 单个batch中的点
             points_single = points[bs_mask][:, 1:4]
             point_cls_labels_single = point_cls_labels.new_zeros(bs_mask.sum())
             box_idxs_of_pts = roiaware_pool3d_utils.points_in_boxes_gpu(
                 points_single.unsqueeze(dim=0), gt_boxes[k:k + 1, :, 0:7].contiguous()
-            ).long().squeeze(dim=0)
+            ).long().squeeze(dim=0) # 如果这个点位于边界框内，则返回这个点对应的边界框的下标，不在则返回-1
             box_fg_flag = (box_idxs_of_pts >= 0)
             if set_ignore_flag:
                 extend_box_idxs_of_pts = roiaware_pool3d_utils.points_in_boxes_gpu(
@@ -101,7 +103,7 @@ class PointHeadTemplate(nn.Module):
 
             # 这个是利用前景点对应的box的下标获得对应的box
             gt_box_of_fg_points = gt_boxes[k][box_idxs_of_pts[fg_flag]]
-            # 这个也是批量复制，对于满足fg_flag的项，将其值赋为对应的box的类别的值
+            # 这个也是批量复制，对于满足fg_flag的项，将其值赋为对应的box的类别的值，这里box的-1表示的是该Box的类别
             point_cls_labels_single[fg_flag] = 1 if self.num_class == 1 else gt_box_of_fg_points[:, -1].long()
             # 在所有的点中，将属于这个批次的点的类别标签对应上
             point_cls_labels[bs_mask] = point_cls_labels_single
