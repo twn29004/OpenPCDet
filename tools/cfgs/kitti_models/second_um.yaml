@@ -70,7 +70,11 @@ MODEL:
 
         TARGET_ASSIGNER_CONFIG:
             NAME: UniformMatchTargetAssigner
+<<<<<<< HEAD
             TOPK: 2
+=======
+            TOPK: 4
+>>>>>>> acd0fe050dc3bf41fc1714b36cb32e6246a19506
             POS_FRACTION: -1.0
             SAMPLE_SIZE: 512
             NORM_BY_NUM_EXAMPLES: False

@@ -21,7 +21,11 @@ MODEL:
         NAME: DilatedResBEVBackbone
 
         OUTPUT_CHANNELS: 512
+<<<<<<< HEAD
         MID_CHANNELS: 256
+=======
+        MID_CHANNELS: 128
+>>>>>>> acd0fe050dc3bf41fc1714b36cb32e6246a19506
         NUM_RES_BLOCKS: 4
         BLOCK_DILATIONS: [1,2,4, 8]
         

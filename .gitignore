@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 **__pycache__**
 **build**
 **egg-info**
@@ -16,3 +17,22 @@ venv/
 *.json
 output
 version.py
+=======
+**__pycache__**
+**build**
+**egg-info**
+**dist**
+data/
+pretrained
+*.pyc
+venv/
+*.idea/
+*.so
+*.sh
+*.pth
+*.pkl
+*.zip
+*.bin
+output
+version.py
+>>>>>>> acd0fe050dc3bf41fc1714b36cb32e6246a19506
