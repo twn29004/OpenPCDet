@@ -147,8 +147,8 @@ class UniformMatchTargetAssigner(object):
             labels[tmp_ignore_idx] = -1
 
 
-            # anchor_by_gt_metric = anchor_by_gt_overlap * anchor_by_gt_distance
-            anchor_by_gt_metric = anchor_by_gt_distance
+            anchor_by_gt_metric = anchor_by_gt_overlap * anchor_by_gt_distance
+            # anchor_by_gt_metric = anchor_by_gt_distance
             # 找到关于每一个GT的具有最大metric的anchor的下标
             topk_values, topk_idxs = anchor_by_gt_metric.topk(k=self.topk, dim=0, largest=True) #[k, num_gt]
             # 将topk_values的也设置为忽略
